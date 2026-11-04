@@ -1,72 +1,27 @@
 """
-ai_model.py
-End-to-End Neural Network AI Localization Model with Persistent Disk Checkpointing.
-
-Design:
-- Pure AI localization (`RadLocNeuralNet`) — all triangulation / L-BFGS code removed.
-- Automatically loads its learned weights, Adam optimizer state, and training metadata
-  from `data/ai_checkpoint.json` on server startup, and saves after every training run
-  so knowledge is never lost when the server restarts.
-- Receives ONLY the 16 raw detector channel counts [S-01..S-16] and ambient background,
-  learning end-to-end to predict (x, y, activity_kbq).
+backend/ai/network.py
+End-to-End Multi-Layer Perceptron (`RadLocNeuralNet`) for radiation leak localization.
+Handles feature extraction, forward/backward propagation, Adam optimization,
+model diagnostics, and JSON model export.
 """
 
-from dataclasses import dataclass, field
 import json
 import math
-import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
-from openmc_engine import (
-    AIR_ATTENUATION_MU,
-    DETECTOR_EFFICIENCY_ETA,
-    DETECTOR_HEIGHT_H,
-    DOMAIN_SIZE,
-    FACILITIES,
-    OpenMCEngine,
-)
-
-
-@dataclass
-class SectorModelState:
-    W1: np.ndarray
-    b1: np.ndarray
-    W2: np.ndarray
-    b2: np.ndarray
-    W3: np.ndarray
-    b3: np.ndarray
-    m_adam: List[np.ndarray] = field(default_factory=list)
-    v_adam: List[np.ndarray] = field(default_factory=list)
-    adam_step: int = 0
-    trained_epochs: int = 0
-    samples_seen: int = 0
-    last_loss: float = 0.0
-    val_mae_m: float = 0.0
-
-
-def expected_sensor_rates_np(
-    sx: np.ndarray,
-    sy: np.ndarray,
-    x: float,
-    y: float,
-    activity_kbq: float,
-    background_cps: float,
-) -> np.ndarray:
-    """Computes expected sensor count rates for the AI's predicted source parameters."""
-    dx = sx - x
-    dy = sy - y
-    r2 = dx * dx + dy * dy + DETECTOR_HEIGHT_H * DETECTOR_HEIGHT_H
-    r = np.sqrt(r2)
-    atten = np.exp(-AIR_ATTENUATION_MU * r) * (1.0 + 0.004 * r)
-    return background_cps + (DETECTOR_EFFICIENCY_ETA * activity_kbq * atten) / r2
+from backend.ai.pathway_analyzer import compute_pathway_telemetry
+from backend.ai.persistence import load_checkpoint_from_disk, save_checkpoint_to_disk
+from backend.ai.state import SectorModelState
+from backend.config import DOMAIN_SIZE, FACILITIES
+from backend.physics.openmc_engine import OpenMCEngine
 
 
 class RadLocNeuralNet:
     """
     End-to-End Multi-Layer Perceptron (MLP) for radiation leak localization.
-    Persists learned weights and optimizer state to disk so knowledge survives restarts.
+    Persists learned weights, initial reference weights, and training history to disk.
     """
 
     def __init__(self, checkpoint_path: str, train_log_path: str, seed: int = 42) -> None:
@@ -78,7 +33,7 @@ class RadLocNeuralNet:
         self.h1_dim = 128
         self.h2_dim = 64
         self.out_dim = 3
-        self.model_version = "RADNET-v3.1-MLP"
+        self.model_version = "RADNET-v3.2-PATHWAY-MLP"
 
         self.weights_by_facility: Dict[str, SectorModelState] = {}
         self.training_history: List[Dict[str, Any]] = []
@@ -87,7 +42,6 @@ class RadLocNeuralNet:
         self.epochs_completed: int = 0
         self.last_val_mae_meters: float = 0.0
 
-        # Initialize default random weights first, then load persisted state if present
         for fkey in FACILITIES:
             self._init_untrained_weights(fkey)
 
@@ -96,7 +50,7 @@ class RadLocNeuralNet:
     def scrub_all(self) -> None:
         """
         Explicitly wipes all learned weights across all facilities back to random
-        initialization, clears training sample logs, and deletes the checkpoint on disk.
+        initialization, clears training sample logs, and overwrites checkpoint on disk.
         """
         self.rng = np.random.default_rng(int(time.time() * 1000) % (2**31 - 1))
         self.weights_by_facility.clear()
@@ -131,6 +85,12 @@ class RadLocNeuralNet:
             b2=b2,
             W3=W3,
             b3=b3,
+            W1_init=W1.copy(),
+            W2_init=W2.copy(),
+            W3_init=W3.copy(),
+            last_dW1=np.zeros_like(W1),
+            last_dW2=np.zeros_like(W2),
+            last_dW3=np.zeros_like(W3),
             m_adam=[
                 np.zeros_like(W1),
                 np.zeros_like(b1),
@@ -147,6 +107,7 @@ class RadLocNeuralNet:
                 np.zeros_like(W3),
                 np.zeros_like(b3),
             ],
+            epoch_curve=[],
         )
         self.weights_by_facility[facility_key] = state
         return state
@@ -157,104 +118,31 @@ class RadLocNeuralNet:
         return self.weights_by_facility[facility_key]
 
     def save_to_disk(self) -> None:
-        """Saves all sector neural network weights and optimizer state to `checkpoint_path`."""
-        sectors_payload: Dict[str, Any] = {}
-        for fkey, st in self.weights_by_facility.items():
-            sectors_payload[fkey] = {
-                "W1": st.W1.tolist(),
-                "b1": st.b1.tolist(),
-                "W2": st.W2.tolist(),
-                "b2": st.b2.tolist(),
-                "W3": st.W3.tolist(),
-                "b3": st.b3.tolist(),
-                "m_adam": [arr.tolist() for arr in st.m_adam],
-                "v_adam": [arr.tolist() for arr in st.v_adam],
-                "adam_step": st.adam_step,
-                "trained_epochs": st.trained_epochs,
-                "samples_seen": st.samples_seen,
-                "last_loss": st.last_loss,
-                "val_mae_m": st.val_mae_m,
-            }
-
-        payload = {
-            "model_version": self.model_version,
-            "saved_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "total_train_samples": self.total_train_samples,
-            "epochs_completed": self.epochs_completed,
-            "last_val_mae_meters": self.last_val_mae_meters,
-            "sectors": sectors_payload,
-        }
-        try:
-            tmp_path = self.checkpoint_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f)
-            os.replace(tmp_path, self.checkpoint_path)
-        except OSError:
-            pass
+        save_checkpoint_to_disk(
+            checkpoint_path=self.checkpoint_path,
+            model_version=self.model_version,
+            total_train_samples=self.total_train_samples,
+            epochs_completed=self.epochs_completed,
+            last_val_mae_meters=self.last_val_mae_meters,
+            weights_by_facility=self.weights_by_facility,
+        )
 
     def load_from_disk(self) -> None:
-        """Loads persisted AI checkpoint and training sample logs from disk if available."""
-        if os.path.exists(self.checkpoint_path) and os.path.getsize(self.checkpoint_path) > 0:
-            try:
-                with open(self.checkpoint_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self.total_train_samples = int(data.get("total_train_samples", 0))
-                self.epochs_completed = int(data.get("epochs_completed", 0))
-                self.last_val_mae_meters = float(data.get("last_val_mae_meters", 0.0))
-                sectors_data = data.get("sectors", {})
-                if isinstance(sectors_data, dict):
-                    for fkey, sdict in sectors_data.items():
-                        W1 = np.array(sdict["W1"], dtype=np.float64)
-                        b1 = np.array(sdict["b1"], dtype=np.float64)
-                        W2 = np.array(sdict["W2"], dtype=np.float64)
-                        b2 = np.array(sdict["b2"], dtype=np.float64)
-                        W3 = np.array(sdict["W3"], dtype=np.float64)
-                        b3 = np.array(sdict["b3"], dtype=np.float64)
-                        m_adam = [np.array(a, dtype=np.float64) for a in sdict.get("m_adam", [])]
-                        v_adam = [np.array(a, dtype=np.float64) for a in sdict.get("v_adam", [])]
-                        if len(m_adam) != 6:
-                            m_adam = [np.zeros_like(p) for p in (W1, b1, W2, b2, W3, b3)]
-                        if len(v_adam) != 6:
-                            v_adam = [np.zeros_like(p) for p in (W1, b1, W2, b2, W3, b3)]
-                        self.weights_by_facility[fkey] = SectorModelState(
-                            W1=W1,
-                            b1=b1,
-                            W2=W2,
-                            b2=b2,
-                            W3=W3,
-                            b3=b3,
-                            m_adam=m_adam,
-                            v_adam=v_adam,
-                            adam_step=int(sdict.get("adam_step", 0)),
-                            trained_epochs=int(sdict.get("trained_epochs", 0)),
-                            samples_seen=int(sdict.get("samples_seen", 0)),
-                            last_loss=float(sdict.get("last_loss", 0.0)),
-                            val_mae_m=float(sdict.get("val_mae_m", 0.0)),
-                        )
-            except (OSError, ValueError, KeyError):
-                pass
-
-        if os.path.exists(self.train_log_path) and os.path.getsize(self.train_log_path) > 0:
-            try:
-                loaded_samples: List[Dict[str, Any]] = []
-                with open(self.train_log_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line_str = line.strip()
-                        if line_str:
-                            loaded_samples.append(json.loads(line_str))
-                self.training_samples_log = loaded_samples[-1000:]
-            except (OSError, ValueError):
-                pass
+        tot_samples, ep_done, last_mae, samples_log = load_checkpoint_from_disk(
+            checkpoint_path=self.checkpoint_path,
+            train_log_path=self.train_log_path,
+            weights_by_facility=self.weights_by_facility,
+        )
+        self.total_train_samples = tot_samples
+        self.epochs_completed = ep_done
+        self.last_val_mae_meters = last_mae
+        self.training_samples_log = samples_log
 
     @staticmethod
     def extract_raw_features(
         counts_batch: np.ndarray,
         backgrounds: np.ndarray,
     ) -> np.ndarray:
-        """
-        Extracts 33-D sensor count feature vector WITHOUT using sensor (x, y) coordinates
-        or any physics formulas.
-        """
         net = np.maximum(0.0, counts_batch - backgrounds[:, None])
         net_sum = np.sum(net, axis=1, keepdims=True) + 1.0
         rel_net = net / net_sum
@@ -306,7 +194,6 @@ class RadLocNeuralNet:
         lr: float = 0.008,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
-        """Trains the AI model directly on the user's logged OpenMC simulation runs."""
         sector_runs = [
             r for r in logged_runs
             if r.get("facility") == facility_key and "raw_counts" in r
@@ -345,10 +232,6 @@ class RadLocNeuralNet:
         lr: float = 0.008,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
-        """
-        Generates `n_samples` OpenMC photon transport realizations, logs every single
-        training sample, and trains the neural network on them.
-        """
         counts_list: List[List[int]] = []
         bkgs_list: List[float] = []
         tx_list: List[float] = []
@@ -417,8 +300,12 @@ class RadLocNeuralNet:
         X = self.extract_raw_features(counts_mat, bkgs)
         Y_target = self._encode_targets(tx, ty, ta)
 
+        W1_before = w_store.W1.copy()
+        W2_before = w_store.W2.copy()
+        W3_before = w_store.W3.copy()
+
         _, _, _, _, _, init_sig = self._forward(X, w_store)
-        init_px, init_py, _ = self._decode_outputs(init_sig)
+        init_px, init_py, init_pa = self._decode_outputs(init_sig)
         init_errs = np.hypot(init_px - tx, init_py - ty)
 
         final_loss = 0.0
@@ -466,6 +353,18 @@ class RadLocNeuralNet:
             w_store.val_mae_m = round(final_mae_m, 3)
             self.last_val_mae_meters = round(final_mae_m, 3)
 
+            reward_score = max(0.0, min(100.0, (1.0 - final_mae_m / 10.0) * 100.0))
+            improved_ratio = float(np.mean(loc_errors < init_errs)) * 100.0
+            w_store.epoch_curve.append({
+                "epoch": w_store.trained_epochs,
+                "loss": round(final_loss, 6),
+                "mae_m": round(final_mae_m, 3),
+                "reward_pct": round(reward_score, 1),
+                "rewarded_paths_pct": round(improved_ratio, 1),
+            })
+            if len(w_store.epoch_curve) > 300:
+                w_store.epoch_curve.pop(0)
+
             if progress_cb is not None and (ep % 5 == 0 or ep == epochs or ep == 1):
                 progress_cb({
                     "epoch": ep,
@@ -473,6 +372,10 @@ class RadLocNeuralNet:
                     "loss": round(final_loss, 6),
                     "val_mae_meters": round(final_mae_m, 3),
                 })
+
+        w_store.last_dW1 = w_store.W1 - W1_before
+        w_store.last_dW2 = w_store.W2 - W2_before
+        w_store.last_dW3 = w_store.W3 - W3_before
 
         _, _, _, _, _, post_sig = self._forward(X, w_store)
         post_px, post_py, post_pa = self._decode_outputs(post_sig)
@@ -484,6 +387,9 @@ class RadLocNeuralNet:
             self.total_train_samples += 1
             w_store.samples_seen += 1
             row_counts = [int(val) for val in counts_mat[i].tolist()]
+            pre_e = float(init_errs[i])
+            post_e = float(post_errs[i])
+            delta_improvement = pre_e - post_e
             sample_entry: Dict[str, Any] = {
                 "sample_id": f"TRN-{self.total_train_samples:04d}",
                 "timestamp_utc": ts_now,
@@ -494,11 +400,16 @@ class RadLocNeuralNet:
                 "true_y": round(float(ty[i]), 2),
                 "true_activity_kbq": round(float(ta[i]), 1),
                 "background_cps": round(float(bkgs[i]), 1),
-                "pre_err_m": round(float(init_errs[i]), 3),
+                "pre_pred_x": round(float(init_px[i]), 2),
+                "pre_pred_y": round(float(init_py[i]), 2),
+                "pre_pred_act": round(float(init_pa[i]), 1),
+                "pre_err_m": round(pre_e, 3),
                 "post_pred_x": round(float(post_px[i]), 2),
                 "post_pred_y": round(float(post_py[i]), 2),
                 "post_pred_act": round(float(post_pa[i]), 1),
-                "post_err_m": round(float(post_errs[i]), 3),
+                "post_err_m": round(post_e, 3),
+                "reward_delta_m": round(delta_improvement, 3),
+                "outcome": "REWARDED" if delta_improvement >= 0.0 else "PENALIZED",
                 "raw_counts": row_counts,
             }
             self.training_samples_log.append(sample_entry)
@@ -506,7 +417,6 @@ class RadLocNeuralNet:
             if len(self.training_samples_log) > 1000:
                 self.training_samples_log.pop(0)
 
-        # Persist updated AI weights and new training samples to disk immediately
         self.save_to_disk()
         try:
             with open(self.train_log_path, "a", encoding="utf-8") as f:
@@ -524,15 +434,37 @@ class RadLocNeuralNet:
             "val_mae_meters": round(final_mae_m, 3),
         }
 
+    def get_pathway_telemetry(
+        self,
+        facility_key: str,
+        counts: Optional[Sequence[int]] = None,
+        background_cps: float = 18.0,
+    ) -> Dict[str, Any]:
+        w = self._get_sector_state(facility_key)
+        if counts is not None and len(counts) == 16:
+            c_arr = np.array([float(v) for v in counts], dtype=np.float64)[None, :]
+        else:
+            c_arr = np.full((1, 16), background_cps, dtype=np.float64)
+        b_arr = np.array([background_cps], dtype=np.float64)
+
+        X = self.extract_raw_features(c_arr, b_arr)
+        _, a1, _, a2, _, out_sig = self._forward(X, w)
+
+        return compute_pathway_telemetry(
+            facility_key=facility_key,
+            w=w,
+            a1=a1,
+            a2=a2,
+            out_sig=out_sig,
+            training_samples_log=self.training_samples_log,
+        )
+
     def predict(
         self,
         facility_key: str,
         counts: Sequence[int],
         background_cps: float,
     ) -> Dict[str, Any]:
-        """
-        Pure forward pass through the AI Neural Network.
-        """
         t0 = time.perf_counter()
         w_store = self._get_sector_state(facility_key)
         c_arr = np.array([float(v) for v in counts], dtype=np.float64)[None, :]
@@ -600,6 +532,7 @@ class RadLocNeuralNet:
                 "samples_seen": w_store.samples_seen,
                 "last_mse_loss": w_store.last_loss if is_trained else None,
                 "validation_mae_meters": w_store.val_mae_m if is_trained else None,
+                "epoch_curve": w_store.epoch_curve,
             },
             "architecture": {
                 "type": "End-to-End MLP",
@@ -618,3 +551,4 @@ class RadLocNeuralNet:
                 "b3": np.round(w_store.b3, 6).tolist(),
             },
         }
+

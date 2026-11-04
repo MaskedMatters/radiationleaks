@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAD-MON-04 // Nuclear Telemetry &amp; AI Localization Control Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <!-- TOP TELEMETRY HEADER BAR -->
+  <header class="top-header">
+    <div class="header-left">
+      <div class="status-badge standby" id="statusBadge" title="Click to toggle continuous OpenMC simulation stream">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">STANDBY</span>
+      </div>
+      <div class="sys-id">
+        <span class="sys-label">SYS-ID</span>
+        <span class="sys-code">RAD-MON-04</span>
+      </div>
+      <div class="header-divider"></div>
+      <div class="facility-selector-wrap">
+        <label for="facilitySelect" class="ctrl-label">FACILITY SECTOR</label>
+        <select id="facilitySelect" class="scada-select">
+          <option value="sector-a" selected>SECTOR-04A // REACTOR AUX BLDG (20m × 20m)</option>
+          <option value="sector-b">SECTOR-04B // SPENT FUEL BAY (20m × 20m)</option>
+          <option value="sector-c">SECTOR-04C // HOT CELL CORRIDOR (20m × 20m)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="meta-pill conn-err" id="backendConnPill">
+        BACKEND: CONNECTING...
+      </div>
+      <div class="meta-pill conn-err" id="aiKnowledgePill">
+        AI STATE: LOADING...
+      </div>
+      <div class="meta-pill" id="lastSnapshotBanner" title="Folder path of most recent screenshot bundle">
+        CAPTURES: READY (captures/)
+      </div>
+      <div class="utc-clock" id="utcClock">2026-00-00 00:00:00.0 UTC</div>
+    </div>
+  </header>
+
+  <main class="dashboard-shell">
+    <!-- PERSISTENT CONTROL RIBBON -->
+    <section class="panel control-ribbon">
+      <div class="controls-row">
+        <div class="control-group slider-group">
+          <div class="slider-header">
+            <label for="activitySlider">SOURCE ACTIVITY (A₀)</label>
+            <span class="mono-val" id="activityValue">850 kBq</span>
+          </div>
+          <input type="range" id="activitySlider" min="50" max="5000" step="25" value="850" />
+          <div class="slider-ticks">
+            <span>50 kBq</span>
+            <span>2,500 kBq</span>
+            <span>5,000 kBq</span>
+          </div>
+        </div>
+
+        <div class="control-group slider-group">
+          <div class="slider-header">
+            <label for="backgroundSlider">AMBIENT BACKGROUND (B)</label>
+            <span class="mono-val" id="backgroundValue">18 cps</span>
+          </div>
+          <input type="range" id="backgroundSlider" min="2" max="150" step="1" value="18" />
+          <div class="slider-ticks">
+            <span>2 cps</span>
+            <span>75 cps</span>
+            <span>150 cps</span>
+          </div>
+        </div>
+
+        <div class="control-actions">
+          <button type="button" class="scada-btn btn-primary" id="btnToggleStream">
+            START CONTINUOUS RUN
+          </button>
+          <button type="button" class="scada-btn" id="btnResampleNoise" title="Execute 1 OpenMC photon transport run at current position">
+            STEP 1 MC FRAME
+          </button>
+          <button type="button" class="scada-btn" id="btnSimulateEvent" title="Relocate leak source randomly and run 1 OpenMC frame">
+            SIMULATE NEW EVENT
+          </button>
+          <button type="button" class="scada-btn btn-accent" id="btnRunValidation" title="Stream 100 Monte Carlo validation runs on backend">
+            RUN 100-RUN VALIDATION
+          </button>
+          <button type="button" class="scada-btn btn-snapshot" id="btnCaptureSnapshot" title="Save PNG screenshots of the 2D Map, Neural Pathways, and all Graphs into captures/">
+            SCREENSHOT MAP &amp; GRAPHS
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- PERSISTENT 5-CARD KPI STRIP -->
+    <section class="kpi-strip">
+      <div class="kpi-card">
+        <div class="kpi-label">TRUE SOURCE LOCATION (X, Y)</div>
+        <div class="kpi-value mono" id="kpiTrueLoc">12.40, 8.15 m</div>
+        <div class="kpi-sub mono" id="kpiTrueZone">ZONE: AUX-BAY-2</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">AI INFERRED LOCATION (X̂, Ŷ)</div>
+        <div class="kpi-value mono highlight-blue" id="kpiEstLoc">NO RUN YET</div>
+        <div class="kpi-sub mono" id="kpiConfidence">STANDBY</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">AI LOCALIZATION ERROR (Δ)</div>
+        <div class="kpi-value mono" id="kpiDeltaError">-- m</div>
+        <div class="kpi-sub mono" id="kpiBatchStats">BATCH P50: -- m</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">AI EST. vs. TRUE ACTIVITY</div>
+        <div class="kpi-value mono" id="kpiActivityComp">-- / 850 kBq</div>
+        <div class="kpi-sub mono" id="kpiActivityErr">BKG: 18 cps</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">AI TRAINING STATE</div>
+        <div class="kpi-value mono" id="kpiLatency">0 EPOCHS</div>
+        <div class="kpi-sub mono" id="kpiIterations">TRAIN SAMPLES: 0</div>
+      </div>
+    </section>
+
+    <!-- SPACIOUS TAB NAVIGATION BAR -->
+    <nav class="tab-nav-bar" aria-label="Dashboard Workspace Views">
+      <button type="button" class="tab-btn active" data-tab="tab-map">
+        <span class="tab-index">01</span>
+        <span class="tab-title">LIVE FACILITY MAP &amp; SENSOR ARRAY</span>
+        <span class="tab-badge mono" id="tabBadgeMap">16 CH</span>
+      </button>
+
+      <button type="button" class="tab-btn" data-tab="tab-pathways">
+        <span class="tab-index">02</span>
+        <span class="tab-title">AI NEURAL PATHWAYS &amp; CONVERGENCE LAB</span>
+        <span class="tab-badge mono" id="tabBadgePathways">0 EP</span>
+      </button>
+
+      <button type="button" class="tab-btn" data-tab="tab-training">
+        <span class="tab-index">03</span>
+        <span class="tab-title">AI TRAINING DATASET &amp; REWARD INSPECTOR</span>
+        <span class="tab-badge mono" id="tabBadgeTraining">0 SAMPLES</span>
+      </button>
+
+      <button type="button" class="tab-btn" data-tab="tab-logs">
+        <span class="tab-index">04</span>
+        <span class="tab-title">OPENMC RUN LOGS &amp; SNAPSHOT ARCHIVE</span>
+        <span class="tab-badge mono" id="tabBadgeLogs">0 RUNS</span>
+      </button>
+    </nav>
+
+    <!-- =====================================================================
+         TAB 01: LIVE FACILITY MAP & 16-CHANNEL SENSOR ARRAY
+         ===================================================================== -->
+    <section class="tab-pane active" id="tab-map">
+      <div class="tab-map-grid">
+        <!-- Left: Large 2D Facility Plan Canvas -->
+        <div class="panel canvas-panel">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <h2 class="panel-title">2D FACILITY FLOORPLAN // OPENMC PHOTON TRANSPORT &amp; AI LOCALIZATION</h2>
+              <span class="panel-subtitle">Click or drag anywhere on the 20m × 20m floorplan to relocate the true leak source</span>
+            </div>
+            <div class="canvas-legend">
+              <span class="legend-item"><i class="leg-icon leg-sensor"></i>Sensor (S-01..16)</span>
+              <span class="legend-item"><i class="leg-icon leg-true"></i>True Leak Source</span>
+              <span class="legend-item"><i class="leg-icon leg-est"></i>AI Estimate</span>
+              <span class="legend-item"><i class="leg-icon leg-reward-vec"></i>Rewarded Training Shift</span>
+              <span class="legend-item"><i class="leg-icon leg-penalized-pt"></i>Penalized Pre-Guess</span>
+            </div>
+          </div>
+
+          <div class="canvas-Subbar">
+            <label class="traj-toggle-label">
+              <input type="checkbox" id="chkShowTrajectories" checked />
+              <span>SHOW REWARDED / PENALIZED TRAINING PATHS ON MAP</span>
+            </label>
+            <span class="mono" id="frameCounter">RUN #0000 // STANDBY</span>
+          </div>
+
+          <div class="canvas-container">
+            <canvas id="facilityCanvas" width="720" height="720"></canvas>
+          </div>
+
+          <div class="canvas-footer">
+            <span id="canvasCoordReadout" class="mono">CURSOR: --, -- m | DOMAIN: 20.0m × 20.0m</span>
+            <span id="solverStatusInline" class="mono">STATE: STANDBY | ENGINE: OPENMC-PHOTON-MC</span>
+          </div>
+        </div>
+
+        <!-- Right: Spacious 16-Channel Sensor Array Table + Flux Chart -->
+        <div class="map-right-stack">
+          <div class="panel table-panel">
+            <div class="panel-header">
+              <h2 class="panel-title">SENSOR ARRAY TELEMETRY (16 FIXED NaI(Tl) PROBES)</h2>
+              <span class="panel-subtitle mono" id="arrayTotalCounts">STANDBY — 0 COUNTS</span>
+            </div>
+            <div class="table-scroll-wrap sensor-table-wrap">
+              <table class="telemetry-table" id="sensorTable">
+                <thead>
+                  <tr>
+                    <th>CH ID</th>
+                    <th>POS (X, Y)</th>
+                    <th class="num">OPENMC RAW (cps)</th>
+                    <th class="num">NET (cps)</th>
+                    <th class="num">AI PRED E[λ]</th>
+                    <th class="num">AI DIST (m)</th>
+                    <th>STATUS</th>
+                  </tr>
+                </thead>
+                <tbody id="sensorTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel chart-panel">
+            <div class="panel-header">
+              <h2 class="panel-title">SENSOR FLUX PROFILE (16-CH OPENMC TALLY vs. AI PREDICTION)</h2>
+              <span class="panel-subtitle mono">REAL-TIME CHANNEL COMPARISON</span>
+            </div>
+            <div class="chart-wrap-tall">
+              <canvas id="fluxChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =====================================================================
+         TAB 02: AI NEURAL PATHWAYS & CONVERGENCE LAB
+         ===================================================================== -->
+    <section class="tab-pane" id="tab-pathways">
+      <!-- AI Training Control Bar -->
+      <div class="panel ai-lab-bar">
+        <div class="ai-lab-left">
+          <span class="ctrl-label">AI NEURAL NETWORK TRAINING &amp; WEIGHT CONTROLS (PERSISTED TO data/ai_checkpoint.json)</span>
+          <span class="mono ai-status-text" id="aiModelStatusInline">
+            AI MODEL: LOADING...
+          </span>
+        </div>
+        <div class="ai-lab-actions">
+          <button type="button" class="scada-btn btn-train" id="btnTrainOnLogs" title="Train the AI neural network for 50 epochs using the logged OpenMC runs">
+            TRAIN AI ON LOGGED RUNS (50 EP)
+          </button>
+          <button type="button" class="scada-btn btn-train" id="btnTrainAiOpenMC" title="Generate 64 new OpenMC photon transport samples and train the AI for 50 epochs">
+            GENERATE &amp; TRAIN (64 MC SAMPLES)
+          </button>
+          <a class="scada-btn btn-export" href="/api/export/model.json" download="radnet_ai_model.json">
+            EXPORT AI WEIGHTS (.JSON)
+          </a>
+          <button type="button" class="scada-btn btn-danger" id="btnScrubAi" title="Wipe all AI neural network weights back to 0 knowledge and clear training samples">
+            SCRUB AI (RESET TO 0 KNOWLEDGE)
+          </button>
+        </div>
+      </div>
+
+      <!-- Full-Width 4-Layer Neural Pathway & Synapse Reinforcement Diagram -->
+      <div class="panel pathway-hero-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title">AI 4-LAYER NEURAL PATHWAY &amp; SYNAPSE REINFORCEMENT GRAPH (16 SENSORS → H1 → H2 → [X, Y, ACTIVITY])</h2>
+            <span class="panel-subtitle">
+              Solid Green Lines (+Δ|W|) = Rewarded / Reinforced Pathways that reduced localization error &nbsp;|&nbsp; Dashed Red Lines (-Δ|W|) = Penalized / Inhibited Pathways
+            </span>
+          </div>
+          <span class="panel-subtitle mono" id="pathwaySummaryLabel">UNTRAINED — 0 SYNAPSES REINFORCED</span>
+        </div>
+
+        <div class="pathway-canvas-container">
+          <canvas id="neuralPathwayCanvas" width="1120" height="400"></canvas>
+        </div>
+
+        <!-- 16-Channel Sensor Synaptic Attribution Cards -->
+        <div class="sensor-attr-header">
+          <span class="ctrl-label">PER-SENSOR SYNAPTIC ATTRIBUTION &amp; REINFORCEMENT BREAKDOWN (S-01 TO S-16)</span>
+        </div>
+        <div class="sensor-attr-grid" id="sensorAttributionGrid"></div>
+      </div>
+
+      <!-- Bottom 2-Column Convergence & Validation Charts -->
+      <div class="pathway-charts-grid">
+        <div class="panel chart-panel">
+          <div class="panel-header">
+            <h2 class="panel-title">TRAINING EPOCH CONVERGENCE: REWARD SCORE (%) vs. ERROR MAE (m)</h2>
+            <span class="panel-subtitle mono" id="epochCurveSummary">0 EPOCHS RECORDED</span>
+          </div>
+          <div class="chart-wrap-tall">
+            <canvas id="rewardCurveChart"></canvas>
+          </div>
+        </div>
+
+        <div class="panel chart-panel">
+          <div class="panel-header">
+            <h2 class="panel-title">100-RUN VALIDATION CDF ERROR DISTRIBUTION (AI NEURAL NETWORK)</h2>
+            <span class="panel-subtitle mono" id="cdfSummaryLabel">0 VALIDATION RUNS</span>
+          </div>
+          <div class="chart-wrap-tall">
+            <canvas id="cdfChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =====================================================================
+         TAB 03: AI TRAINING DATASET & REWARD INSPECTOR
+         ===================================================================== -->
+    <section class="tab-pane" id="tab-training">
+      <div class="panel full-table-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title">AI TRAINING DATASET &amp; SPATIAL PATH REWARD INSPECTOR</h2>
+            <span class="panel-subtitle" id="trainDataCountLabel">
+              Inspect every sample used to train the AI, its penalized pre-training guess, rewarded post-training prediction, and distance improvement (Δm)
+            </span>
+          </div>
+          <div class="log-actions">
+            <a class="scada-btn btn-export" href="/api/export/training_data.csv" download="rad_mon_04_ai_training_data.csv">
+              EXPORT TRAINING CSV
+            </a>
+            <a class="scada-btn btn-export" href="/api/export/training_data.json" download="rad_mon_04_ai_training_data.json">
+              EXPORT TRAINING JSON
+            </a>
+          </div>
+        </div>
+
+        <div class="table-scroll-wrap full-page-table-wrap">
+          <table class="telemetry-table" id="trainingDataTable">
+            <thead>
+              <tr>
+                <th>SAMPLE ID</th>
+                <th>TIMESTAMP (UTC)</th>
+                <th>SOURCE</th>
+                <th>PATH OUTCOME</th>
+                <th>TARGET TRUE (X, Y)</th>
+                <th class="num">TARGET ACT (kBq)</th>
+                <th>PENALIZED PRE-GUESS (X, Y)</th>
+                <th class="num">PRE-ERR (m)</th>
+                <th>REWARDED POST-PRED (X, Y)</th>
+                <th class="num">POST-ERR (m)</th>
+                <th class="num">REWARD SHIFT (Δm)</th>
+                <th>16-CH INPUT COUNTS [S-01..S-16] (cps)</th>
+              </tr>
+            </thead>
+            <tbody id="trainingDataTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- =====================================================================
+         TAB 04: OPENMC RUN LOGS & SNAPSHOT ARCHIVE
+         ===================================================================== -->
+    <section class="tab-pane" id="tab-logs">
+      <!-- Saved Screenshot Archive Card -->
+      <div class="panel archive-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title">SAVED SCREENSHOT BUNDLES ARCHIVE (captures/)</h2>
+            <span class="panel-subtitle">Each snapshot bundle saves PNGs of the 2D Map, Neural Pathways, CDF Chart, Flux Chart, Composite Board, and JSON Metadata</span>
+          </div>
+          <button type="button" class="scada-btn btn-snapshot" id="btnCaptureHeader">
+            CAPTURE NEW SNAPSHOT BUNDLE
+          </button>
+        </div>
+        <div class="snapshot-archive-list" id="snapshotArchiveList">
+          <div class="empty-archive-msg">No snapshots captured in this session yet — click "CAPTURE NEW SNAPSHOT BUNDLE" or "SCREENSHOT MAP &amp; GRAPHS".</div>
+        </div>
+      </div>
+
+      <!-- Full-Width OpenMC Simulation Run Log Table -->
+      <div class="panel full-table-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title">OPENMC SIMULATION RUN LOGS &amp; AI TELEMETRY EXPORT</h2>
+            <span class="panel-subtitle mono" id="logCountLabel">(0 RUNS PERSISTED)</span>
+          </div>
+          <div class="log-actions">
+            <a class="scada-btn btn-export" href="/api/export/logs.csv" download="rad_mon_04_run_logs.csv">
+              DOWNLOAD LOGS CSV
+            </a>
+            <a class="scada-btn btn-export" href="/api/export/logs.json" download="rad_mon_04_run_logs.json">
+              DOWNLOAD LOGS JSON
+            </a>
+            <a class="scada-btn btn-export" href="/api/export/openmc.py" download="openmc_facility_model.py">
+              EXPORT OPENMC PYTHON DECK (.PY)
+            </a>
+            <button type="button" class="scada-btn" id="btnClearLogs">
+              CLEAR RUN LOGS
+            </button>
+            <button type="button" class="scada-btn btn-danger" id="btnScrubAll">
+              SCRUB ALL LOGS &amp; AI
+            </button>
+          </div>
+        </div>
+
+        <div class="table-scroll-wrap full-page-table-wrap">
+          <table class="telemetry-table" id="runLogTable">
+            <thead>
+              <tr>
+                <th>RUN ID</th>
+                <th>TIMESTAMP (UTC)</th>
+                <th>MODE</th>
+                <th>SECTOR</th>
+                <th>AI KNOWLEDGE STATE</th>
+                <th>TRUE SOURCE (X, Y)</th>
+                <th class="num">TRUE ACT (kBq)</th>
+                <th>AI EST (X̂, Ŷ)</th>
+                <th class="num">AI ACT (kBq)</th>
+                <th class="num">AI ERROR (m)</th>
+                <th class="num">LATENCY</th>
+                <th>16-CH RAW COUNTS [S-01..S-16] (cps)</th>
+              </tr>
+            </thead>
+            <tbody id="runLogTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- MODULAR FRONTEND JAVASCRIPT ARCHITECTURE -->
+  <script src="/js/state.js"></script>
+  <script src="/js/tabs.js"></script>
+  <script src="/js/map_renderer.js"></script>
+  <script src="/js/pathway_renderer.js"></script>
+  <script src="/js/charts.js"></script>
+  <script src="/js/tables.js"></script>
+  <script src="/js/snapshot.js"></script>
+  <script src="/js/main.js"></script>
+</body>
+</html>
+
