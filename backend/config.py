@@ -21,12 +21,17 @@ TRAIN_LOG_FILE_PATH = os.path.join(DATA_DIR, "ai_training_samples.jsonl")
 AI_CHECKPOINT_PATH = os.path.join(DATA_DIR, "ai_checkpoint.json")
 SESSION_STATE_PATH = os.path.join(DATA_DIR, "session_state.json")
 
-# Physical & Domain Constants
+# Physical & Domain Constants (Cs-137 662 keV Gamma Transport)
 DOMAIN_SIZE = 20.0
 DETECTOR_HEIGHT_H = 1.0
 DETECTOR_EFFICIENCY_ETA = 3.6
 AIR_ATTENUATION_MU = 0.010
 DWELL_TIME_SEC = 1.0
+
+# Concrete Shielding Wall Constants (22 cm Reinforced Concrete Partition Walls)
+WALL_THICKNESS_M = 0.22
+WALL_LINEAR_ATTEN_MU = 6.80  # Effective attenuation coeff (m^-1) for 662 keV in concrete with buildup
+WALL_SCATTER_FLOOR = 0.025   # Residual room-scatter / skyshine fraction around wall baffles
 
 
 def generate_grid_sensors(min_coord: float, max_coord: float, n_cols: int) -> List[Dict[str, Any]]:
@@ -129,4 +134,3 @@ FACILITIES: Dict[str, Dict[str, Any]] = {
         ],
     },
 }
-

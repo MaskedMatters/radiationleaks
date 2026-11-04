@@ -209,6 +209,7 @@
                   <tr>
                     <th>CH ID</th>
                     <th>POS (X, Y)</th>
+                    <th>WALL SHIELD</th>
                     <th class="num">OPENMC RAW (cps)</th>
                     <th class="num">NET (cps)</th>
                     <th class="num">AI PRED E[λ]</th>
@@ -241,23 +242,23 @@
       <!-- AI Training Control Bar -->
       <div class="panel ai-lab-bar">
         <div class="ai-lab-left">
-          <span class="ctrl-label">AI NEURAL NETWORK TRAINING &amp; WEIGHT CONTROLS (PERSISTED TO data/ai_checkpoint.json)</span>
+          <span class="ctrl-label" id="aiSectorBoundBanner">SECTOR-ISOLATED AI MODEL // BOUND TO ACTIVE FACILITY ENVIRONMENT ONLY</span>
           <span class="mono ai-status-text" id="aiModelStatusInline">
             AI MODEL: LOADING...
           </span>
         </div>
         <div class="ai-lab-actions">
-          <button type="button" class="scada-btn btn-train" id="btnTrainOnLogs" title="Train the AI neural network for 50 epochs using the logged OpenMC runs">
-            TRAIN AI ON LOGGED RUNS (50 EP)
+          <button type="button" class="scada-btn btn-train" id="btnTrainOnLogs" title="Train this sector's dedicated AI neural network for 50 epochs using runs logged in this sector">
+            TRAIN SECTOR AI ON LOGGED RUNS (50 EP)
           </button>
-          <button type="button" class="scada-btn btn-train" id="btnTrainAiOpenMC" title="Generate 64 new OpenMC photon transport samples and train the AI for 50 epochs">
-            GENERATE &amp; TRAIN (64 MC SAMPLES)
+          <button type="button" class="scada-btn btn-train" id="btnTrainAiOpenMC" title="Generate 64 new OpenMC photon transport samples (with wall shielding) in this sector and train its AI for 50 epochs">
+            GENERATE &amp; TRAIN SECTOR AI (64 MC SAMPLES)
           </button>
           <a class="scada-btn btn-export" href="/api/export/model.json" download="radnet_ai_model.json">
-            EXPORT AI WEIGHTS (.JSON)
+            EXPORT SECTOR AI WEIGHTS (.JSON)
           </a>
-          <button type="button" class="scada-btn btn-danger" id="btnScrubAi" title="Wipe all AI neural network weights back to 0 knowledge and clear training samples">
-            SCRUB AI (RESET TO 0 KNOWLEDGE)
+          <button type="button" class="scada-btn btn-danger" id="btnScrubAi" title="Wipe this sector's AI neural network weights back to 0 knowledge">
+            SCRUB SECTOR AI (0 KNOWLEDGE)
           </button>
         </div>
       </div>

@@ -112,49 +112,61 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/export/logs.csv":
             with BACKEND.lock:
-                logs = list(BACKEND.run_logs)
+                fkey = BACKEND.facility_key
+                logs = [r for r in BACKEND.run_logs if r.get("facility") == fkey]
             self._send_bytes(
                 build_run_logs_csv(logs),
                 "text/csv; charset=utf-8",
-                "rad_mon_04_run_logs.csv",
+                f"rad_mon_04_{fkey}_run_logs.csv",
             )
             return
 
         if path == "/api/export/logs.json":
             with BACKEND.lock:
+                fkey = BACKEND.facility_key
+                sector_logs = [r for r in BACKEND.run_logs if r.get("facility") == fkey]
                 data = build_run_logs_json(
                     BACKEND._utc_now_str(),
-                    BACKEND.get_ai_status(),
-                    list(BACKEND.run_logs),
+                    BACKEND.get_ai_status(fkey),
+                    sector_logs,
                 )
             self._send_bytes(
                 data,
                 "application/json; charset=utf-8",
-                "rad_mon_04_run_logs.json",
+                f"rad_mon_04_{fkey}_run_logs.json",
             )
             return
 
         if path == "/api/export/training_data.csv":
             with BACKEND.lock:
-                samples = list(BACKEND.ai_net.training_samples_log)
+                fkey = BACKEND.facility_key
+                samples = [
+                    s for s in BACKEND.ai_net.training_samples_log
+                    if s.get("facility") == fkey
+                ]
             self._send_bytes(
                 build_training_samples_csv(samples),
                 "text/csv; charset=utf-8",
-                "rad_mon_04_ai_training_data.csv",
+                f"rad_mon_04_{fkey}_ai_training_data.csv",
             )
             return
 
         if path == "/api/export/training_data.json":
             with BACKEND.lock:
+                fkey = BACKEND.facility_key
+                samples = [
+                    s for s in BACKEND.ai_net.training_samples_log
+                    if s.get("facility") == fkey
+                ]
                 data = build_training_samples_json(
                     BACKEND._utc_now_str(),
-                    BACKEND.get_ai_status(),
-                    list(BACKEND.ai_net.training_samples_log),
+                    BACKEND.get_ai_status(fkey),
+                    samples,
                 )
             self._send_bytes(
                 data,
                 "application/json; charset=utf-8",
-                "rad_mon_04_ai_training_data.json",
+                f"rad_mon_04_{fkey}_ai_training_data.json",
             )
             return
 
@@ -195,6 +207,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/control":
             run_on_change = bool(body.get("trigger_run", False))
             mode_label = str(body.get("mode", "PARAM-UPDATE"))
+            switched_sector: str = ""
 
             with BACKEND.lock:
                 if "running" in body:
@@ -202,9 +215,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                 if "facility_key" in body and str(body["facility_key"]) in FACILITIES:
                     new_fkey = str(body["facility_key"])
                     if new_fkey != BACKEND.facility_key:
-                        BACKEND.facility_key = new_fkey
-                        if len(BACKEND.run_logs) == 0:
-                            BACKEND.latest_frame = BACKEND._build_idle_standby_frame()
+                        switched_sector = new_fkey
                 if "source_activity_kbq" in body:
                     BACKEND.source_activity_kbq = max(
                         5.0, min(15000.0, float(body["source_activity_kbq"]))
@@ -224,6 +235,17 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                         "y": max(0.2, min(DOMAIN_SIZE - 0.2, float(ts.get("y", 10.0)))),
                     }
                 BACKEND._save_session_state()
+
+            if switched_sector:
+                BACKEND.switch_facility(switched_sector)
+                self._send_json({
+                    "ok": True,
+                    "running": BACKEND.running,
+                    "facility_key": BACKEND.facility_key,
+                    "ai_model_status": BACKEND.get_ai_status(),
+                    "pathway_telemetry": BACKEND.get_pathway_telemetry(),
+                })
+                return
 
             if run_on_change:
                 BACKEND.execute_single_run(mode=mode_label, broadcast=True)
@@ -297,15 +319,19 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/logs/clear":
             with BACKEND.lock:
-                BACKEND.run_logs.clear()
-                BACKEND.run_counter = 0
+                fkey = BACKEND.facility_key
+                BACKEND.run_logs = [
+                    r for r in BACKEND.run_logs if r.get("facility") != fkey
+                ]
                 try:
                     with open(LOG_FILE_PATH, "w", encoding="utf-8") as f:
-                        f.truncate(0)
+                        for r in BACKEND.run_logs:
+                            f.write(json.dumps(r) + "\n")
                 except OSError:
                     pass
+                BACKEND.latest_frame = BACKEND._build_idle_standby_frame(fkey)
                 BACKEND._save_session_state()
-            BACKEND.broadcast_event("logs_cleared", {})
+            BACKEND.broadcast_event("logs_cleared", {"facility_key": fkey})
             self._send_json({"ok": True})
             return
 
@@ -319,7 +345,8 @@ def run_server() -> None:
     st = BACKEND.get_ai_status()
     print(f"[RAD-MON-04] OpenMC & Pure AI Telemetry Backend listening on http://localhost:{port}")
     print(
-        f"[RAD-MON-04] Restored AI State: {st['knowledge_state']} "
+        f"[RAD-MON-04] Active Sector: {BACKEND.facility_key.upper()} | "
+        f"AI State: {st['knowledge_state']} "
         f"({st['trained_epochs']} epochs, {st['samples_seen']} samples) | "
         f"Restored Runs: {len(BACKEND.run_logs)}"
     )
@@ -328,4 +355,3 @@ def run_server() -> None:
     except KeyboardInterrupt:
         print("\n[RAD-MON-04] Shutting down server (all AI weights & logs persisted to data/).")
         server.server_close()
-

@@ -1,7 +1,7 @@
 /**
  * frontend/js/tables.js
- * Renders the KPI cards, 16-Channel Sensor Array table, AI Training Dataset & Reward Inspector
- * table, OpenMC Run Log table, and Saved Screenshot Bundles Archive list.
+ * Renders the KPI cards, 16-Channel Sensor Array table (including Concrete Wall Shielding),
+ * AI Training Dataset & Reward Inspector table, OpenMC Run Log table, and Snapshot Archive.
  */
 
 (function () {
@@ -62,21 +62,27 @@
 
     setText(
       'solverStatusInline',
-      `STATE: ${runStateStr} | ENGINE: ${String(state.mcEngineName).toUpperCase()}`
+      `STATE: ${runStateStr} | ENGINE: ${String(state.mcEngineName).toUpperCase()} (22cm CONCRETE WALL SHIELDING)`
     );
 
+    const sectorUpper = String(state.facilityKey).toUpperCase();
     const aiStat = state.aiModelStatus;
     const aiPill = document.getElementById('aiKnowledgePill');
     if (aiStat) {
       if (aiPill) {
         if (aiStat.is_trained) {
           aiPill.className = 'meta-pill conn-ok';
-          aiPill.textContent = `AI STATE: TRAINED (${aiStat.trained_epochs} EP / ${aiStat.samples_seen} SAMPLES)`;
+          aiPill.textContent = `AI [${sectorUpper}]: TRAINED (${aiStat.trained_epochs} EP / ${aiStat.samples_seen} SAMPLES)`;
         } else {
           aiPill.className = 'meta-pill conn-err';
-          aiPill.textContent = 'AI STATE: UNTRAINED (0 KNOWLEDGE)';
+          aiPill.textContent = `AI [${sectorUpper}]: UNTRAINED (0 KNOWLEDGE)`;
         }
       }
+
+      setText(
+        'aiSectorBoundBanner',
+        `SECTOR-ISOLATED AI MODEL // BOUND TO ${sectorUpper} ENVIRONMENT ONLY (NOT CROSS-SECTOR)`
+      );
 
       const maeText =
         aiStat.is_trained && typeof aiStat.val_mae_meters === 'number'
@@ -90,7 +96,7 @@
 
       setText(
         'aiModelStatusInline',
-        `AI: ${aiStat.knowledge_state} | EPOCHS: ${aiStat.trained_epochs} | SAMPLES: ${aiStat.samples_seen} | MAE: ${maeText} | LOSS: ${lossText} | ||W||: [${wn.W1_l2}, ${wn.W2_l2}, ${wn.W3_l2}]`
+        `ENV: ${sectorUpper} ONLY | STATE: ${aiStat.knowledge_state} | EPOCHS: ${aiStat.trained_epochs} | SAMPLES: ${aiStat.samples_seen} | MAE: ${maeText} | LOSS: ${lossText} | ||W||: [${wn.W1_l2}, ${wn.W2_l2}, ${wn.W3_l2}]`
       );
     }
 
@@ -103,13 +109,14 @@
     const tr = state.trueSource;
     const aiSol = state.aiSolution;
     const aiStat = state.aiModelStatus;
+    const sectorUpper = String(state.facilityKey).toUpperCase();
 
     setText('kpiTrueLoc', `${Number(tr.x).toFixed(2)}, ${Number(tr.y).toFixed(2)} m`);
     setText('kpiTrueZone', `ZONE: ${state.trueZone}`);
 
     if (!state.hasRun) {
       setText('kpiEstLoc', 'NO RUN YET');
-      setText('kpiConfidence', 'STANDBY (0 RUNS)');
+      setText('kpiConfidence', `STANDBY (${sectorUpper})`);
       setText('kpiDeltaError', '-- m');
       setText('kpiBatchStats', 'BATCH P50: -- m');
       setText('kpiActivityComp', `-- / ${Math.round(state.sourceActivityKbq)} kBq`);
@@ -119,8 +126,8 @@
       setText(
         'kpiConfidence',
         aiSol.is_trained
-          ? `TRAINED (${aiSol.trained_epochs} EPOCHS) | ${Number(aiSol.latency_ms).toFixed(2)}ms`
-          : 'UNTRAINED WEIGHTS (0 EPOCHS)'
+          ? `TRAINED [${sectorUpper}] (${aiSol.trained_epochs} EP) | ${Number(aiSol.latency_ms).toFixed(2)}ms`
+          : `UNTRAINED [${sectorUpper}] (0 EPOCHS)`
       );
       setText('kpiDeltaError', `${Number(aiSol.error_meters).toFixed(3)} m`);
 
@@ -153,7 +160,7 @@
         'kpiLatency',
         aiStat.is_trained ? `${aiStat.trained_epochs} EPOCHS` : '0 EPOCHS (RAW)'
       );
-      setText('kpiIterations', `TRAIN SAMPLES: ${aiStat.samples_seen}`);
+      setText('kpiIterations', `${sectorUpper} SAMPLES: ${aiStat.samples_seen}`);
     }
 
     setText(
@@ -171,12 +178,24 @@
     }
 
     let totalGross = 0;
+    let shieldedCount = 0;
     let peakSensor = state.sensorReadings[0];
     let rowsHtml = '';
 
     for (const r of state.sensorReadings) {
       totalGross += Number(r.raw);
       if (Number(r.raw) > Number(peakSensor.raw)) peakSensor = r;
+
+      const nWalls = Number(r.wallCrossings || 0);
+      if (nWalls > 0) shieldedCount++;
+      const wallTrans =
+        typeof r.wallTransmission === 'number' ? Number(r.wallTransmission) : 1.0;
+      const transPct = Math.round(wallTrans * 100);
+
+      const shieldBadge =
+        nWalls === 0
+          ? `<span class="row-status status-rewarded">LOS (100%)</span>`
+          : `<span class="row-status status-elevated">${nWalls} WALL${nWalls > 1 ? 'S' : ''} (${transPct}%)</span>`;
 
       const badgeClass =
         r.status === 'ALARM'
@@ -190,6 +209,7 @@
         <tr data-sensor-id="${r.id}" class="${activeClass}">
           <td class="ch-tag">${r.id}</td>
           <td>(${Number(r.x).toFixed(1)}, ${Number(r.y).toFixed(1)})</td>
+          <td>${shieldBadge}</td>
           <td class="num">${r.raw}</td>
           <td class="num">${Number(r.net).toFixed(0)}</td>
           <td class="num">${Number(r.modelFit).toFixed(1)}</td>
@@ -203,8 +223,8 @@
     setText(
       'arrayTotalCounts',
       totalGross > 0
-        ? `TOTAL GROSS: ${totalGross} cps | PEAK: ${peakSensor.id} (${peakSensor.raw} cps)`
-        : 'STANDBY — 0 COUNTS RECORDED'
+        ? `TOTAL: ${totalGross} cps | PEAK: ${peakSensor.id} (${peakSensor.raw} cps) | SHIELDED: ${shieldedCount}/16 CH`
+        : `STANDBY — ${shieldedCount}/16 CH BEHIND CONCRETE WALLS`
     );
 
     tbody.querySelectorAll('tr').forEach((tr) => {
@@ -226,17 +246,18 @@
   RadMon.updateTrainingDataTable = function () {
     const tbody = document.getElementById('trainingDataTableBody');
     if (!tbody) return;
+    const sectorUpper = String(state.facilityKey).toUpperCase();
     const samples = Array.isArray(state.trainingSamples) ? state.trainingSamples : [];
 
     if (samples.length === 0) {
       setText(
         'trainDataCountLabel',
-        '(0 TRAINING SAMPLES — AI MODEL IS UNTRAINED)'
+        `(0 TRAINING SAMPLES IN ${sectorUpper} — ${sectorUpper} AI MODEL IS UNTRAINED)`
       );
       tbody.innerHTML = `
         <tr>
           <td colspan="12" style="text-align:center;color:#64748b;padding:24px;">
-            NO TRAINING DATA YET — Open Tab "02 // AI NEURAL PATHWAYS &amp; CONVERGENCE LAB" and click "TRAIN AI ON LOGGED RUNS" or "GENERATE &amp; TRAIN (64 MC SAMPLES)" to train the AI.
+            NO TRAINING DATA FOR ${sectorUpper} YET — Open Tab "02 // AI NEURAL PATHWAYS &amp; CONVERGENCE LAB" and click "TRAIN SECTOR AI ON LOGGED RUNS" or "GENERATE &amp; TRAIN SECTOR AI (64 MC SAMPLES)".
           </td>
         </tr>
       `;
@@ -252,7 +273,7 @@
 
     setText(
       'trainDataCountLabel',
-      `(${samples.length} SAMPLES PERSISTED | ${rewardedCount} REWARDED / ${samples.length - rewardedCount} PENALIZED)`
+      `(${samples.length} SAMPLES IN ${sectorUpper} | ${rewardedCount} REWARDED / ${samples.length - rewardedCount} PENALIZED)`
     );
 
     let html = '';
@@ -303,13 +324,14 @@
   RadMon.updateRunLogTable = function () {
     const tbody = document.getElementById('runLogTableBody');
     if (!tbody) return;
-    setText('logCountLabel', `(${state.runLogs.length} RUNS PERSISTED)`);
+    const sectorUpper = String(state.facilityKey).toUpperCase();
+    setText('logCountLabel', `(${state.runLogs.length} RUNS LOGGED IN ${sectorUpper})`);
 
     if (state.runLogs.length === 0) {
       tbody.innerHTML = `
         <tr>
           <td colspan="12" style="text-align:center;color:#64748b;padding:24px;">
-            0 RUNS LOGGED. Click "STEP 1 MC FRAME", "SIMULATE NEW EVENT", or "START CONTINUOUS RUN" to record OpenMC runs.
+            0 RUNS LOGGED IN ${sectorUpper}. Click "STEP 1 MC FRAME", "SIMULATE NEW EVENT", or "START CONTINUOUS RUN" to record OpenMC runs.
           </td>
         </tr>
       `;
@@ -383,4 +405,3 @@
     listEl.innerHTML = html;
   };
 })();
-

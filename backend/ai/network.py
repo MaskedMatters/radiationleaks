@@ -1,8 +1,12 @@
 """
 backend/ai/network.py
 End-to-End Multi-Layer Perceptron (`RadLocNeuralNet`) for radiation leak localization.
-Handles feature extraction, forward/backward propagation, Adam optimization,
-model diagnostics, and JSON model export.
+
+Strict Environment Isolation:
+Each facility sector (`sector-a`, `sector-b`, `sector-c`) has its own dedicated, isolated
+neural network (`SectorModelState`) trained exclusively on that sector's 16-sensor layout
+and concrete wall shielding geometry. A model trained in one sector is never applied to
+another sector.
 """
 
 import json
@@ -20,8 +24,9 @@ from backend.physics.openmc_engine import OpenMCEngine
 
 class RadLocNeuralNet:
     """
-    End-to-End Multi-Layer Perceptron (MLP) for radiation leak localization.
-    Persists learned weights, initial reference weights, and training history to disk.
+    Sector-isolated End-to-End Multi-Layer Perceptron (MLP) for radiation leak localization.
+    Each sector maintains its own independent weights, Adam optimizer state, epoch curve,
+    and training sample log.
     """
 
     def __init__(self, checkpoint_path: str, train_log_path: str, seed: int = 42) -> None:
@@ -33,7 +38,7 @@ class RadLocNeuralNet:
         self.h1_dim = 128
         self.h2_dim = 64
         self.out_dim = 3
-        self.model_version = "RADNET-v3.2-PATHWAY-MLP"
+        self.model_version = "RADNET-v3.3-SECTOR-ISOLATED"
 
         self.weights_by_facility: Dict[str, SectorModelState] = {}
         self.training_history: List[Dict[str, Any]] = []
@@ -46,6 +51,27 @@ class RadLocNeuralNet:
             self._init_untrained_weights(fkey)
 
         self.load_from_disk()
+
+    def scrub_sector(self, facility_key: str) -> None:
+        """
+        Wipes learned weights, optimizer state, and training samples for a single
+        facility sector back to 0 knowledge while leaving other sectors untouched.
+        """
+        self._init_untrained_weights(facility_key)
+        self.training_samples_log = [
+            s for s in self.training_samples_log if s.get("facility") != facility_key
+        ]
+        self.total_train_samples = len(self.training_samples_log)
+        self.epochs_completed = sum(
+            st.trained_epochs for st in self.weights_by_facility.values()
+        )
+        self.save_to_disk()
+        try:
+            with open(self.train_log_path, "w", encoding="utf-8") as f:
+                for s in self.training_samples_log:
+                    f.write(json.dumps(s) + "\n")
+        except OSError:
+            pass
 
     def scrub_all(self) -> None:
         """
@@ -116,6 +142,16 @@ class RadLocNeuralNet:
         if facility_key not in self.weights_by_facility:
             return self._init_untrained_weights(facility_key)
         return self.weights_by_facility[facility_key]
+
+    def get_sector_training_samples(
+        self, facility_key: str, limit: int = 150
+    ) -> List[Dict[str, Any]]:
+        """Returns recent training samples strictly belonging to `facility_key`."""
+        sector_only = [
+            s for s in self.training_samples_log if s.get("facility") == facility_key
+        ]
+        rev = list(reversed(sector_only))
+        return rev[:limit]
 
     def save_to_disk(self) -> None:
         save_checkpoint_to_disk(
@@ -194,6 +230,10 @@ class RadLocNeuralNet:
         lr: float = 0.008,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
+        """
+        Trains ONLY the neural network bound to `facility_key` using runs logged
+        exclusively within `facility_key`.
+        """
         sector_runs = [
             r for r in logged_runs
             if r.get("facility") == facility_key and "raw_counts" in r
@@ -201,7 +241,7 @@ class RadLocNeuralNet:
         if not sector_runs:
             return {
                 "ok": False,
-                "error": f"No logged runs found for {facility_key}. Run at least 1 simulation first.",
+                "error": f"No logged runs found for {facility_key.upper()}. Run at least 1 simulation in {facility_key.upper()} first.",
             }
 
         counts_mat = np.array([r["raw_counts"] for r in sector_runs], dtype=np.float64)
@@ -219,7 +259,7 @@ class RadLocNeuralNet:
             ta=ta,
             epochs=epochs,
             lr=lr,
-            source_tag="LOGGED-RUNS",
+            source_tag=f"LOGGED ({facility_key.upper()})",
             progress_cb=progress_cb,
         )
 
@@ -232,6 +272,10 @@ class RadLocNeuralNet:
         lr: float = 0.008,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
+        """
+        Generates synthetic OpenMC photon transport samples (including concrete wall
+        shielding specific to `facility_key`) and trains ONLY `facility_key`'s AI model.
+        """
         counts_list: List[List[int]] = []
         bkgs_list: List[float] = []
         tx_list: List[float] = []
@@ -273,7 +317,7 @@ class RadLocNeuralNet:
             ta=ta,
             epochs=epochs,
             lr=lr,
-            source_tag="OPENMC-SYNTH",
+            source_tag=f"OPENMC ({facility_key.upper()})",
             progress_cb=progress_cb,
         )
 
@@ -391,7 +435,7 @@ class RadLocNeuralNet:
             post_e = float(post_errs[i])
             delta_improvement = pre_e - post_e
             sample_entry: Dict[str, Any] = {
-                "sample_id": f"TRN-{self.total_train_samples:04d}",
+                "sample_id": f"{facility_key.upper()}-TRN-{w_store.samples_seen:04d}",
                 "timestamp_utc": ts_now,
                 "source_tag": source_tag,
                 "facility": facility_key,
@@ -414,7 +458,7 @@ class RadLocNeuralNet:
             }
             self.training_samples_log.append(sample_entry)
             new_samples.append(sample_entry)
-            if len(self.training_samples_log) > 1000:
+            if len(self.training_samples_log) > 1500:
                 self.training_samples_log.pop(0)
 
         self.save_to_disk()
@@ -482,8 +526,10 @@ class RadLocNeuralNet:
         ci95 = max(0.20, min(2.0, w_store.val_mae_m)) if is_trained and w_store.val_mae_m > 0 else 2.50
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        sector_tag = facility_key.upper()
         return {
-            "solver": "AI-MLP" if is_trained else "AI-MLP (UNTRAINED)",
+            "solver": f"AI-MLP ({sector_tag})" if is_trained else f"AI-MLP (UNTRAINED {sector_tag})",
+            "facility_key": facility_key,
             "is_trained": is_trained,
             "trained_epochs": w_store.trained_epochs,
             "x": round(raw_x, 3),
@@ -498,15 +544,22 @@ class RadLocNeuralNet:
 
     def get_model_diagnostics(self, facility_key: str) -> Dict[str, Any]:
         w = self._get_sector_state(facility_key)
+        facility = FACILITIES.get(facility_key, FACILITIES["sector-a"])
         is_trained = w.trained_epochs > 0
+        sector_tag = facility_key.upper()
         return {
-            "model_version": self.model_version,
+            "model_version": f"{self.model_version} [{sector_tag}]",
             "facility_key": facility_key,
+            "bound_environment": facility["name"],
             "is_trained": is_trained,
-            "knowledge_state": "TRAINED (PERSISTED)" if is_trained else "UNTRAINED (0 KNOWLEDGE)",
+            "knowledge_state": (
+                f"TRAINED ON {sector_tag} ONLY (PERSISTED)"
+                if is_trained
+                else f"UNTRAINED IN {sector_tag} (0 KNOWLEDGE)"
+            ),
             "trained_epochs": w.trained_epochs,
             "samples_seen": w.samples_seen,
-            "total_samples": self.total_train_samples,
+            "total_samples": w.samples_seen,
             "last_loss": w.last_loss if is_trained else None,
             "val_mae_meters": w.val_mae_m if is_trained else None,
             "weight_norms": {
@@ -521,11 +574,12 @@ class RadLocNeuralNet:
         facility = FACILITIES.get(facility_key, FACILITIES["sector-a"])
         is_trained = w_store.trained_epochs > 0
         return {
-            "model_name": "RAD-MON-04 End-to-End Neural Localization Model",
+            "model_name": f"RAD-MON-04 Sector-Isolated Neural Localization Model ({facility_key.upper()})",
             "model_version": self.model_version,
             "exported_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "facility_key": facility_key,
-            "facility_name": facility["name"],
+            "bound_environment": facility["name"],
+            "cross_sector_compatible": False,
             "knowledge_state": "TRAINED" if is_trained else "UNTRAINED",
             "training_metadata": {
                 "trained_epochs": w_store.trained_epochs,
@@ -535,7 +589,7 @@ class RadLocNeuralNet:
                 "epoch_curve": w_store.epoch_curve,
             },
             "architecture": {
-                "type": "End-to-End MLP",
+                "type": "Sector-Specific End-to-End MLP",
                 "input_dim": self.in_dim,
                 "input_features": ["rel_net_counts[16]", "log1p_raw_counts[16]", "log1p_background[1]"],
                 "hidden_dims": [self.h1_dim, self.h2_dim],
@@ -551,4 +605,3 @@ class RadLocNeuralNet:
                 "b3": np.round(w_store.b3, 6).tolist(),
             },
         }
-

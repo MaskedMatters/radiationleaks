@@ -257,6 +257,11 @@
         RadMon.applyFramePayload(frame);
       });
 
+      evtSource.addEventListener('sector_changed', (e) => {
+        const fullState = JSON.parse(e.data);
+        RadMon.applyFullState(fullState);
+      });
+
       evtSource.addEventListener('status', (e) => {
         const st = JSON.parse(e.data);
         state.running = Boolean(st.running);
@@ -307,6 +312,9 @@
         if (done.ai_model_status) state.aiModelStatus = done.ai_model_status;
         if (done.pathway_telemetry) state.pathwayTelemetry = done.pathway_telemetry;
         if (done.training_samples) state.trainingSamples = done.training_samples;
+        if (done.latest_frame) {
+          RadMon.applyFramePayload(done.latest_frame);
+        }
         const b1 = getButton('btnTrainOnLogs');
         const b2 = getButton('btnTrainAiOpenMC');
         if (b1) b1.disabled = false;

@@ -1,1 +1,1 @@
-{"facility_key": "sector-a", "true_source": {"x": 15.63, "y": 15.1}, "source_activity_kbq": 850.0, "ambient_background_cps": 18.0, "validation_errors_ai": [], "captures_history": []}
+{"facility_key": "sector-a", "true_source": {"x": 7.26, "y": 10.18}, "source_activity_kbq": 850.0, "ambient_background_cps": 18.0, "validation_errors_by_sector": {"sector-a": [], "sector-b": [], "sector-c": []}, "captures_history": []}

@@ -1,8 +1,8 @@
 /**
  * frontend/js/map_renderer.js
  * 2D Facility Floorplan Canvas renderer (720x720) with interactive source dragging,
- * 16 NaI(Tl) sensor count-rate heat bubbles, AI localization crosshair, and optional
- * spatial training trajectory vectors (Penalized Pre-Guess -> Rewarded Post-Prediction).
+ * 22 cm concrete shielding wall barriers, 16 NaI(Tl) sensor count-rate heat bubbles,
+ * AI localization crosshair, and optional spatial training trajectory vectors.
  */
 
 (function () {
@@ -165,12 +165,22 @@
       ctx.fillText(String(z.label), tl.cx + 8, tl.cy + 8);
     }
 
-    // Concrete Shielding Walls
-    ctx.strokeStyle = '#94a3b8';
-    ctx.lineWidth = 3.0;
+    // 22 cm Concrete Shielding Walls (drawn as physical structural barriers)
     for (const w of facility.walls) {
       const p1 = worldToCanvas(Number(w.x1), Number(w.y1), W, H);
       const p2 = worldToCanvas(Number(w.x2), Number(w.y2), W, H);
+      // Outer concrete casing
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 7.0;
+      ctx.lineCap = 'butt';
+      ctx.beginPath();
+      ctx.moveTo(p1.cx, p1.cy);
+      ctx.lineTo(p2.cx, p2.cy);
+      ctx.stroke();
+
+      // Inner concrete core highlight
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 3.0;
       ctx.beginPath();
       ctx.moveTo(p1.cx, p1.cy);
       ctx.lineTo(p2.cx, p2.cy);
@@ -209,7 +219,7 @@
     ctx.rect(PAD, PAD, plotW, plotH);
     ctx.clip();
 
-    // --- Optional Spatial Training Trajectories Overlay ---
+    // --- Optional Spatial Training Trajectories Overlay (Strictly for Active Sector) ---
     if (state.showTrainingTrajectories) {
       const pt = state.pathwayTelemetry || {};
       const trajectories =
@@ -276,7 +286,7 @@
       }
     }
 
-    // --- 16 Fixed NaI(Tl) Sensor Probes ---
+    // --- 16 Fixed NaI(Tl) Sensor Probes & Wall Shielding Indicators ---
     const rawValues = state.sensorReadings.map(
       /** @param {Record<string, any>} s */ (s) => Number(s.raw)
     );
@@ -285,6 +295,27 @@
     for (const s of state.sensorReadings) {
       const pt = worldToCanvas(Number(s.x), Number(s.y), W, H);
       const rawVal = Number(s.raw);
+      const nWalls = Number(s.wallCrossings || 0);
+      const wallTrans =
+        typeof s.wallTransmission === 'number' ? Number(s.wallTransmission) : 1.0;
+
+      // If this sensor is hovered in the table, draw its ray from True Source showing wall attenuation
+      if (state.hoveredSensorId === s.id) {
+        ctx.save();
+        ctx.beginPath();
+        if (nWalls > 0) {
+          ctx.setLineDash([5, 4]);
+          ctx.strokeStyle = 'rgba(180, 83, 9, 0.75)';
+        } else {
+          ctx.strokeStyle = 'rgba(21, 128, 61, 0.70)';
+        }
+        ctx.lineWidth = 1.8;
+        ctx.moveTo(truePt.cx, truePt.cy);
+        ctx.lineTo(pt.cx, pt.cy);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       const netRatio =
         rawVal > 0
           ? Math.max(
@@ -338,12 +369,18 @@
       ctx.fillStyle = '#0f172a';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.fillText(String(s.id), pt.cx, pt.cy - 8);
+      const shieldTag = nWalls > 0 ? `${s.id} [${nWalls}W]` : String(s.id);
+      ctx.fillText(shieldTag, pt.cx, pt.cy - 8);
 
       ctx.font = '500 10px "JetBrains Mono", monospace';
-      ctx.fillStyle = isAlarm ? '#b91c1c' : '#475569';
+      ctx.fillStyle = isAlarm ? '#b91c1c' : nWalls > 0 ? '#64748b' : '#334155';
       ctx.textBaseline = 'top';
-      ctx.fillText(`${rawVal} cps`, pt.cx, pt.cy + 8);
+      const transPct = Math.round(wallTrans * 100);
+      ctx.fillText(
+        nWalls > 0 ? `${rawVal} cps (${transPct}%)` : `${rawVal} cps`,
+        pt.cx,
+        pt.cy + 8
+      );
     }
 
     if (state.hasRun) {
@@ -376,7 +413,10 @@
       ctx.lineWidth = 1.6;
       ctx.stroke();
 
-      const tag = aiSol.is_trained ? 'AI-TRAINED' : 'AI-UNTRAINED';
+      const sectorUpper = String(state.facilityKey).toUpperCase();
+      const tag = aiSol.is_trained
+        ? `AI-${sectorUpper}`
+        : `AI-UNTRAINED (${sectorUpper})`;
       drawCanvasCallout(
         ctx,
         aiPt.cx + 12,
@@ -484,4 +524,3 @@
     });
   };
 })();
-
